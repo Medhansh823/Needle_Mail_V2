@@ -1,0 +1,4 @@
+import{createHash}from"node:crypto";
+export interface IdempotencyStore{has(key:string):Promise<boolean>;put(key:string,ttlMs:number):Promise<void>}
+export class MemoryIdempotencyStore implements IdempotencyStore{private map=new Map<string,number>();async has(key:string){const exp=this.map.get(key);if(!exp)return false;if(exp<Date.now()){this.map.delete(key);return false}return true}async put(key:string,ttlMs:number){this.map.set(key,Date.now()+ttlMs)}}
+export function actionFingerprint(input:{organizationId:string;userId:string;action:string;emailId?:string;args:Record<string,unknown>}){const stable=JSON.stringify(input,(k,v)=>v&&typeof v==='object'&&!Array.isArray(v)?Object.keys(v).sort().reduce((o,x)=>(o[x]=v[x],o),{} as Record<string,unknown>):v);return createHash("sha256").update(stable).digest("hex")}

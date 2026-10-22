@@ -1,0 +1,5 @@
+import type{ActionProposal,RiskLevel}from"../domain/types.ts";
+export type ApprovalStatus="pending"|"approved"|"rejected"|"expired";
+export interface ApprovalRequest{id:string;organizationId:string;userId:string;proposal:ActionProposal;risk:RiskLevel;status:ApprovalStatus;createdAt:string;expiresAt:string;decidedAt?:string;decidedBy?:string}
+export interface ApprovalStore{create(r:ApprovalRequest):Promise<void>;get(id:string):Promise<ApprovalRequest|undefined>;decide(id:string,status:"approved"|"rejected",userId:string):Promise<ApprovalRequest>}
+export class MemoryApprovalStore implements ApprovalStore{private map=new Map<string,ApprovalRequest>();async create(r:ApprovalRequest){this.map.set(r.id,r)}async get(id:string){return this.map.get(id)}async decide(id:string,status:"approved"|"rejected",userId:string){const r=this.map.get(id);if(!r)throw Error("Approval not found");if(r.status!=="pending")throw Error("Approval is no longer pending");r.status=status;r.decidedAt=new Date().toISOString();r.decidedBy=userId;return r}}

@@ -1,0 +1,1 @@
+export const apiVersion="v1";export interface ApiError{code:string;message:string;requestId:string}export interface AnalyzeInboxRequest{accountId:string;limit?:number}export interface ReplyRequest{emailId:string;mode:"draft"|"send"}export interface PermissionUpdateRequest{action:string;mode:"ask"|"auto"|"deny";minConfidence?:number;sender?:string;category?:string}

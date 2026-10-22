@@ -1,0 +1,1 @@
+import type{NeedleRuntime,NeedleService}from"./needle.ts";export interface NeedleTransport{generate(input:string,tools:unknown[]):Promise<unknown>}export class Needle2Runtime implements NeedleRuntime{constructor(private readonly transport:NeedleTransport){}analyze(input:string,tools:unknown[]){return this.transport.generate(input,tools)}}

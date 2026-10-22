@@ -1,0 +1,288 @@
+import type { Email } from "../domain/types.ts"; import type { EmailProvider } from "./email.ts"; import { randomBytes } from "node:crypto";
+
+// Rate limiter: simple token bucket per provider instance
+type RateLimiter = {
+    tokens: number;
+    lastRefill: number;
+    maxTokens: number;
+    refillRate: number; // tokens per second
+};
+
+const createRateLimiter = (maxTokens: number, refillRate: number): RateLimiter => ({
+    tokens: maxTokens,
+    lastRefill: Date.now(),
+    maxTokens,
+    refillRate,
+});
+
+const refillLimiter = (rl: RateLimiter) => {
+    const now = Date.now();
+    const elapsed = now - rl.lastRefill;
+    const addedTokens = Math.floor((elapsed * rl.refillRate) / 1000);
+    if (addedTokens > 0) {
+        rl.tokens = Math.min(rl.maxTokens, rl.tokens + addedTokens);
+        rl.lastRefill = now;
+    }
+};
+
+export class GmailProvider implements EmailProvider {
+    private readonly rateLimiter: RateLimiter;
+    constructor(private readonly accessToken: string, private readonly base = "https://gmail.googleapis.com/gmail/v1/users/me", rateLimit = 10, refillRate = 2) {
+        this.rateLimiter = createRateLimiter(rateLimit, refillRate);
+    }
+
+    async createTask(threadId: string, title: string): Promise<void> {
+        throw new Error("Not implemented");
+    }
+
+    async createReminder(threadId: string, title: string): Promise<void> {
+        throw new Error("Not implemented");
+    }
+
+    async bulkAction(operations: string, threadId: string): Promise<void> {
+        throw new Error("Not implemented");
+    }
+
+    private async req(path: string, init: RequestInit = {}): Promise<Response> {
+        // Apply rate limiting
+        refillLimiter(this.rateLimiter);
+        if (this.rateLimiter.tokens < 1) {
+            // Wait a bit before retrying
+            await new Promise(resolve => setTimeout(resolve, 100));
+            refillLimiter(this.rateLimiter);
+        }
+        this.rateLimiter.tokens--;
+        const r = await fetch(this.base + path, { ...init, headers: { "Authorization": "Bearer " + this.accessToken, "Content-Type": "application/json", ...(init.headers ?? {}) } });
+        return r;
+    }
+
+    private async reqWithRetry(path: string, init: RequestInit = {}, maxRetries = 3): Promise<Response> {
+        let lastError: unknown = null;
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            const r = await this.req(path, init);
+            if (r.ok) return r;
+            const status = r.status;
+            const text = await r.text();
+
+            // Exponential backoff: 1s, 2s, 4s
+            if (attempt < maxRetries) {
+                const backoffMs = 1000 * Math.pow(2, attempt);
+                await new Promise(resolve => setTimeout(resolve, backoffMs));
+                continue;
+            }
+            throw new Error(`Gmail API ${status}: ${text}`);
+        }
+        throw lastError as Error;
+    }
+
+    private async parseJsonResponse(r: Response): Promise<any> {
+        if (!r.ok) {
+            const text = await r.text();
+            throw new Error(`Gmail API ${r.status}: ${text}`);
+        }
+        return r.json();
+    }
+
+    async listInbox(accountId: string) {
+        const q = await this.reqWithRetry("/messages?q=in:inbox");
+        const data = await this.parseJsonResponse(q);
+        const out: Email[] = [];
+        for (const x of (data.messages ?? []).slice(0, 100)) {
+            const m = await this.reqWithRetry("/messages/" + x.id + "?format=full");
+            const mData = await this.parseJsonResponse(m);
+            out.push(this.map(mData, accountId));
+        }
+        return out;
+    }
+
+    async getThread(threadId: string) {
+        const t = await this.reqWithRetry("/threads/" + threadId + "?format=full");
+        const data = await this.parseJsonResponse(t);
+        return (data.messages ?? []).map((m: any) => this.map(m, "me"));
+    }
+
+    private map(m: any, accountId: string): Email {
+        const date = m.payload?.headers?.find((h: any) => h.name.toLowerCase() === "date".toLowerCase())?.value ?? "";
+        return {
+            id: m.id,
+            threadId: m.threadId,
+            accountId,
+            sender: m.payload?.headers?.find((h: any) => h.name.toLowerCase() === "from".toLowerCase())?.value ?? "",
+            recipients: (m.payload?.headers?.find((h: any) => h.name.toLowerCase() === "to".toLowerCase())?.value ?? "").split(",").map((x: string) => x.trim()).filter(Boolean),
+            subject: m.payload?.headers?.find((h: any) => h.name.toLowerCase() === "subject".toLowerCase())?.value ?? "",
+            body: this.body(m),
+            receivedAt: new Date(date).toISOString(),
+            labels: m.labelIds ?? []
+        };
+    }
+
+    private body(m: any): string {
+        const p = m.payload;
+        if (p?.body?.data) return Buffer.from(p.body.data.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+        for (const x of p?.parts ?? []) if (x.body?.data && (x.mimeType === "text/plain" || x.mimeType === "text/html")) return Buffer.from(x.body.data.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+        return "";
+    }
+
+    private async modify(id: string, addLabelIds: string[] = [], removeLabelIds: string[] = []) {
+        return this.reqWithRetry("/messages/" + id + "/modify", { method: "POST", body: JSON.stringify({ addLabelIds, removeLabelIds }) });
+    }
+
+    async applyLabel(id: string, l: string) { await this.modify(id, [l]) }
+    async removeLabel(id: string, l: string) { await this.modify(id, [], [l]) }
+    async archive(id: string) { await this.modify(id, [], ["INBOX"]) }
+    async restore(id: string) { await this.modify(id, ["INBOX"], []) }
+    async markRead(id: string) { await this.modify(id, [], ["UNREAD"]) }
+    async markUnread(id: string) { await this.modify(id, ["UNREAD"]) }
+    async star(id: string) { await this.modify(id, ["STARRED"]) }
+    async unstar(id: string) { await this.modify(id, [], ["STARRED"]) }
+    async move(id: string, d: string) { await this.modify(id, [d], ["INBOX"]) }
+    async delete(id: string) {
+        await this.reqWithRetry("/messages/" + id, { method: "DELETE" });
+    }
+
+    private encode(to: string[], subject: string, bodyText: string, extra = "") {
+        return Buffer.from("To: " + to.join(", ") + "\r\nSubject: " + subject + "\r\n" + extra + "Content-Type: text/plain; charset=utf-8\r\n\r\n" + bodyText).toString("base64url");
+    }
+
+    async createDraft(to: string[], subject: string, bodyText: string, threadId?: string) {
+        const raw = this.encode(to, subject, bodyText);
+        const r = await this.reqWithRetry("/drafts", { method: "POST", body: JSON.stringify({ message: { raw, threadId } }) });
+        const data = await this.parseJsonResponse(r);
+        return data.id;
+    }
+
+    async sendReply(id: string, bodyText: string) {
+        const m = await this.reqWithRetry("/messages/" + id + "?format=metadata&metadataHeaders=From&metadataHeaders=Subject");
+        const data = await this.parseJsonResponse(m);
+        const from = data.payload?.headers?.find((h: any) => h.name.toLowerCase() === "from".toLowerCase())?.value ?? "";
+        const subject = data.payload?.headers?.find((h: any) => h.name.toLowerCase() === "subject".toLowerCase())?.value ?? "";
+        const raw = this.encode([from], "Re: " + subject, bodyText, "In-Reply-To: " + id + "\r\nReferences: " + id + "\r\n");
+        const r = await this.reqWithRetry("/messages/send", { method: "POST", body: JSON.stringify({ raw, threadId: data.threadId }) });
+        const data2 = await this.parseJsonResponse(r);
+        return data2.id;
+    }
+
+    async sendForward(id: string, to: string[], bodyText: string) {
+        const m = await this.reqWithRetry("/messages/" + id + "?format=full");
+        const data = await this.parseJsonResponse(m);
+        const subject = data.payload?.headers?.find((h: any) => h.name.toLowerCase() === "subject".toLowerCase())?.value ?? "Fwd: ";
+        const raw = this.encode(to, subject, bodyText);
+        const r = await this.reqWithRetry("/messages/send", { method: "POST", body: JSON.stringify({ raw, threadId: data.threadId }) });
+        const data2 = await this.parseJsonResponse(r);
+        return data2.id;
+    }
+}
+
+/**
+ * Incremental sync using Gmail history API
+ * Returns new messages since the given historyId, and the new historyId
+ */
+export async function incrementalSync(
+    accessToken: string,
+    sinceHistoryId?: string,
+    rateLimit = 10,
+    refillRate = 2
+): Promise<{ emails: Email[]; newHistoryId: string }> {
+    const base = "https://gmail.googleapis.com/gmail/v1/users/me";
+    const rl: RateLimiter = { tokens: rateLimit, lastRefill: Date.now(), maxTokens: rateLimit, refillRate };
+    const refill = () => {
+        const now = Date.now();
+        const elapsed = now - rl.lastRefill;
+        const added = Math.floor((elapsed * rl.refillRate) / 1000);
+        if (added > 0) {
+            rl.tokens = Math.min(rl.maxTokens, rl.tokens + added);
+            rl.lastRefill = now;
+        }
+    };
+    const fetchPage = async (pageToken?: string) => {
+        refill();
+        const url = new URL(`${base}/messages/list`);
+        url.searchParams.set("q", "in:inbox");
+        if (pageToken) url.searchParams.set("pageToken", pageToken);
+        if (sinceHistoryId) url.searchParams.set("historyId", sinceHistoryId);
+        const r = await fetch(url.toString(), { headers: { "Authorization": "Bearer " + accessToken } });
+        if (!r.ok) throw new Error(`Gmail API ${r.status}: ${await r.text()}`);
+        const data = await r.json();
+        return data;
+    };
+
+    const allEmails: Email[] = [];
+    let historyId = sinceHistoryId;
+    let pageToken: string | undefined;
+
+    do {
+        const data = await fetchPage(pageToken);
+        refill();
+        for (const m of (data.messages ?? [])) {
+            const msg = await (await fetch(`${base}/messages/${m.id}?format=full`, { headers: { "Authorization": "Bearer " + accessToken } })).json();
+            allEmails.push({
+                id: msg.id,
+                threadId: msg.threadId,
+                accountId: "me",
+                sender: msg.payload?.headers?.find((h: any) => h.name.toLowerCase() === "from".toLowerCase())?.value ?? "",
+                recipients: (msg.payload?.headers?.find((h: any) => h.name.toLowerCase() === "to".toLowerCase())?.value ?? "").split(",").map((x: string) => x.trim()).filter(Boolean),
+                subject: msg.payload?.headers?.find((h: any) => h.name.toLowerCase() === "subject".toLowerCase())?.value ?? "",
+                body: (() => {
+                    const p = msg.payload;
+                    if (p?.body?.data) return Buffer.from(p.body.data.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+                    for (const x of p?.parts ?? []) if (x.body?.data && (x.mimeType === "text/plain" || x.mimeType === "text/html")) return Buffer.from(x.body.data.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+                    return "";
+                })(),
+                receivedAt: new Date(msg.payload?.headers?.find((h: any) => h.name.toLowerCase() === "date".toLowerCase())?.value ?? "").toISOString(),
+                labels: msg.labelIds ?? []
+            });
+        }
+        pageToken = data.nextPageToken;
+        historyId = data.historyId ?? historyId;
+    } while (pageToken);
+
+    const finalHistoryId: string = historyId ?? sinceHistoryId ?? ""
+    return { emails: allEmails, newHistoryId: finalHistoryId };
+}
+
+/**
+ * Gmail Watch - Set up push notification watch on mailbox
+ * Returns the watchId which can be used to check for changes
+ */
+export async function setupGmailWatch(
+    accessToken: string,
+    emailAddress: string,
+    topicName: string,
+    labelIds: string[] = ["INBOX"]
+): Promise<{ resourceId: string; expiresIn: number }> {
+    const body = {
+        labelIds,
+        topicName: `projects/${topicName}/subscriptions/default`,
+        payloadVersion: "full"
+    };
+    const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/watch`, {
+        method: "POST",
+        headers: {
+            "Authorization": "Bearer " + accessToken,
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify(body)
+    });
+    if (!r.ok) {
+        const txt = await r.text();
+        throw new Error(`Gmail watch failed: ${r.status} ${txt}`);
+    }
+    return r.json();
+}
+
+/**
+ * Gmail Watch - List changes (polling alternative to pubsub)
+ * Returns the list of changes since the last sync
+ */
+export async function listGmailChanges(
+    accessToken: string,
+    historyId: string,
+    pageToken?: string
+): Promise<{ messages: any[]; newHistoryId: string; nextPageToken: string }> {
+    const url = new URL(`https://gmail.googleapis.com/gmail/v1/users/me/history/list`);
+    url.searchParams.set("startHistoryId", historyId);
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+    const r = await fetch(url.toString(), { headers: { "Authorization": "Bearer " + accessToken } });
+    if (!r.ok) throw new Error(`Gmail history list failed: ${await r.text()}`);
+    return r.json();
+}

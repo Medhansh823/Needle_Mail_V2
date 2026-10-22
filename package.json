@@ -1,0 +1,22 @@
+{
+    "name": "needle-mail",
+    "private": true,
+    "version": "0.2.0",
+    "type": "module",
+    "scripts": {
+        "test": "node --test --experimental-strip-types",
+        "test:watch": "node --test --watch --experimental-strip-types",
+        "typecheck": "tsc --noEmit",
+        "dev": "node --experimental-strip-types src/demo.ts"
+    },
+    "dependencies": {
+        "drizzle-orm": "^0.45.4",
+        "hono": "^4.13.13",
+        "pg": "^8.11.3"
+    },
+    "devDependencies": {
+        "@types/node": "^22.15.0",
+        "@types/pg": "^8.10.9",
+        "typescript": "^5.8.3"
+    }
+}

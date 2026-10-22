@@ -1,0 +1,30 @@
+ Volume in drive E is Medhansh
+ Volume Serial Number is 1CEC-68B6
+
+ Directory of e:\needle-mail-main\node_modules
+
+02-10-2026  12:39    <DIR>          .
+02-10-2026  12:39    <DIR>          ..
+02-10-2026  12:39    <DIR>          undici-types
+02-10-2026  12:39    <DIR>          typescript
+02-10-2026  12:39    <DIR>          @types
+02-10-2026  12:39    <DIR>          .bin
+19-10-2026  21:42            10,741 .package-lock.json
+18-10-2026  11:52    <DIR>          pg-types
+18-10-2026  11:52    <DIR>          pg-protocol
+18-10-2026  11:52    <DIR>          pg-cloudflare
+18-10-2026  11:52    <DIR>          pg-connection-string
+18-10-2026  11:52    <DIR>          pg-pool
+18-10-2026  11:52    <DIR>          pgpass
+18-10-2026  11:52    <DIR>          pg-int8
+18-10-2026  11:52    <DIR>          postgres-array
+18-10-2026  11:52    <DIR>          postgres-bytea
+18-10-2026  11:52    <DIR>          postgres-date
+18-10-2026  11:52    <DIR>          postgres-interval
+18-10-2026  11:52    <DIR>          split2
+18-10-2026  11:52    <DIR>          xtend
+18-10-2026  11:52    <DIR>          pg
+19-10-2026  21:40    <DIR>          hono
+19-10-2026  21:40    <DIR>          drizzle-orm
+               1 File(s)         10,741 bytes
+              22 Dir(s)  12,812,812,288 bytes free
